@@ -1,75 +1,78 @@
-// SOLMARA — input: keyboard state plus one-shot action edges (confirm, pause,
-// enter/exit car, punch, mute). Mouse click also confirms on menu screens.
+// Keyboard and pointer input. Held keys give a steering vector; one-shot presses
+// (confirm, pause, interact, punch, mute) are queued as bit flags and taken once by
+// the loop, so a press between two frames is never lost and never counted twice.
 export const ACTION_CONFIRM = 1;
 export const ACTION_PAUSE = 2;
-export const ACTION_ENTER = 4;
+export const ACTION_INTERACT = 4;
 export const ACTION_PUNCH = 8;
 export const ACTION_MUTE = 16;
-export const ACTION_NEWGAME = 32;
-export const ACTION_START = 64;
 
-const KEY_ACTIONS = {
-  Enter: ACTION_START,
-  KeyP: ACTION_PAUSE,
-  Escape: ACTION_PAUSE,
-  KeyE: ACTION_ENTER,
-  KeyJ: ACTION_PUNCH,
-  KeyM: ACTION_MUTE,
-  KeyN: ACTION_NEWGAME,
-};
+const UP = new Set(['ArrowUp', 'KeyW']);
+const DOWN = new Set(['ArrowDown', 'KeyS']);
+const LEFT = new Set(['ArrowLeft', 'KeyA']);
+const RIGHT = new Set(['ArrowRight', 'KeyD']);
+const RUN = new Set(['ShiftLeft', 'ShiftRight']);
+const BRAKE = new Set(['Space']);
+const CONFIRM = new Set(['Enter']);
+const PAUSE = new Set(['KeyP', 'Escape']);
+const INTERACT = new Set(['KeyE']);
+const PUNCH = new Set(['KeyF']);
+const MUTE = new Set(['KeyM']);
 
-export function createInput(canvas) {
-  const down = new Set();
+export function createInput(target) {
+  const held = new Set();
   let actions = 0;
-  let clicked = false;
 
-  function onKeyDown(event) {
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(event.key)) event.preventDefault();
-    if (!event.repeat) {
-      const action = KEY_ACTIONS[event.code] ?? KEY_ACTIONS[event.key];
-      if (action) actions |= action;
-      if (event.code === 'Space') actions |= ACTION_PUNCH;
+  window.addEventListener('keydown', (event) => {
+    if (event.repeat) {
+      if (UP.has(event.code) || DOWN.has(event.code) || LEFT.has(event.code) || RIGHT.has(event.code)) {
+        held.add(event.code);
+      }
+      return;
     }
-    down.add(event.code);
-    down.add(event.key);
-  }
-  function onKeyUp(event) {
-    down.delete(event.code);
-    down.delete(event.key);
-  }
-  function onClick() {
-    clicked = true;
-  }
-  function onBlur() {
-    down.clear();
-  }
+    if (UP.has(event.code) || DOWN.has(event.code) || LEFT.has(event.code) || RIGHT.has(event.code)
+      || RUN.has(event.code) || BRAKE.has(event.code)) {
+      held.add(event.code);
+    } else if (CONFIRM.has(event.code)) actions |= ACTION_CONFIRM;
+    else if (PAUSE.has(event.code)) actions |= ACTION_PAUSE;
+    else if (INTERACT.has(event.code)) actions |= ACTION_INTERACT;
+    else if (PUNCH.has(event.code)) actions |= ACTION_PUNCH;
+    else if (MUTE.has(event.code)) actions |= ACTION_MUTE;
+    else return;
+    event.preventDefault();
+  });
+  window.addEventListener('keyup', (event) => {
+    held.delete(event.code);
+  });
+  // A key released while the tab is hidden never sends keyup: let go on blur.
+  window.addEventListener('blur', () => held.clear());
+  target.addEventListener('pointerdown', () => {
+    actions |= ACTION_CONFIRM;
+  });
 
-  window.addEventListener('keydown', onKeyDown);
-  window.addEventListener('keyup', onKeyUp);
-  window.addEventListener('blur', onBlur);
-  canvas.addEventListener('mousedown', onClick);
-
-  function held(...codes) {
-    return codes.some((code) => down.has(code));
+  function has(set) {
+    for (const code of set) if (held.has(code)) return true;
+    return false;
   }
 
   return {
-    // -1/0/1 steering and throttle axes for this frame.
-    axes() {
-      const x = (held('KeyD', 'ArrowRight') ? 1 : 0) - (held('KeyA', 'ArrowLeft') ? 1 : 0);
-      const y = (held('KeyS', 'ArrowDown') ? 1 : 0) - (held('KeyW', 'ArrowUp') ? 1 : 0);
-      return { x, y };
+    /** Steering vector, each component -1, 0 or 1. */
+    vector() {
+      return {
+        x: (has(RIGHT) ? 1 : 0) - (has(LEFT) ? 1 : 0),
+        y: (has(DOWN) ? 1 : 0) - (has(UP) ? 1 : 0),
+      };
     },
     running() {
-      return held('ShiftLeft', 'ShiftRight');
+      return has(RUN);
     },
-    handbrake() {
-      return held('Space');
+    braking() {
+      return has(BRAKE);
     },
+    /** The one-shot presses since the last call, as ACTION_* flags. */
     takeActions() {
-      const taken = actions | (clicked ? ACTION_CONFIRM : 0);
+      const taken = actions;
       actions = 0;
-      clicked = false;
       return taken;
     },
   };
