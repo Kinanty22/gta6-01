@@ -1,134 +1,150 @@
-// Solmara — Streets of Gold: every number that tunes the city, the cars and the law.
-// One place for the constants so the simulation, the renderer and the screenshots agree.
+// SOLMARA — Streets of Gold: every tuning number and colour in one place.
+// The city is a fixed 3600x2600 world; the renderer follows the player with a
+// camera, so no rule below depends on the screen size.
+
+export const WORLD = { width: 3600, height: 2600 };
+
+/** The simulation's fixed step, in seconds: 60 updates a second whatever the display's rate. */
 export const STEP = 1 / 60;
-export const SAVE_KEY = 'solmara-save-v1';
 
-export const WORLD = { w: 3600, h: 2600 };
+/** The view the renderer paints (1280x800 screenshots, and the live game). */
+export const VIEW = { width: 1280, height: 800 };
 
-// Road centrelines. Avenues run north-south, streets east-west; every road is ROAD_W wide.
-export const AVENUES = [300, 900, 1500, 2100, 2700, 3300];
-export const STREETS = [250, 700, 1150, 1600, 2050];
-export const ROAD_W = 96;
-
-// The sea eats the south edge; the beach is the strip just above it.
-export const BEACH_Y = 2300;
-export const SEA_Y = 2380;
-
-// The park block, between avenue 900 and avenue 1500, streets 700 and 1150.
-export const PARK = { x: 972, y: 772, w: 456, h: 306 };
-export const POND = { x: 1200, y: 925, rx: 130, ry: 78 };
-
-// Named places the missions and the respawns use.
-export const PLACES = {
-  start: { x: 1780, y: 1420 },
-  policeHq: { x: 1830, y: 420 },
-  hospital: { x: 2430, y: 1330 },
-  marina: { x: 3150, y: 1850 },
-  docks: { x: 3330, y: 1900 },
-  tower: { x: 1950, y: 450 },
-  safehouse: { x: 1200, y: 1900 },
+export const PLAYER = {
+  radius: 14,
+  walkSpeed: 220,
+  runSpeed: 340,
+  punchRange: 46,
+  punchDamage: 25,
+  punchCooldown: 0.4,
+  maxHealth: 100,
 };
 
-// Five districts, each a rectangle with its own ground tint and name.
-export const DISTRICTS = [
-  { name: 'Old Town', x: 0, y: 250, w: 900, h: 2050, ground: '#c9b18c' },
-  { name: 'Downtown', x: 1500, y: 250, w: 1200, h: 900, ground: '#bfae8e' },
-  { name: 'Marina', x: 2700, y: 1150, w: 900, h: 1150, ground: '#b7ad8f' },
-  { name: 'Suburbs', x: 900, y: 1600, w: 1800, h: 700, ground: '#c2b48f' },
-  { name: 'Palm Beach', x: 2700, y: 2050, w: 900, h: 330, ground: '#d8c49a' },
-];
+export const CAR = {
+  accel: 520,
+  brake: 700,
+  reverseMax: 220,
+  maxSpeed: 560,
+  steer: 2.6,
+  grip: 3.2,
+  radius: 20,
+  maxHealth: 100,
+  smokeBelow: 40,
+};
 
-// On foot.
-export const WALK_SPEED = 175;
-export const RUN_SPEED = 268;
-export const PLAYER_RADIUS = 13;
-export const PLAYER_HEALTH = 100;
-export const PUNCH_RANGE = 34;
-export const PUNCH_DAMAGE = 34;
-export const PUNCH_COOLDOWN = 0.45;
+export const PED = { radius: 11, minSpeed: 38, maxSpeed: 72 };
 
-// Cars.
-export const CAR_LENGTH = 48;
-export const CAR_WIDTH = 24;
-export const CAR_ACCEL = 430;
-export const CAR_BRAKE = 620;
-export const CAR_MAX_SPEED = 565;
-export const CAR_MAX_REVERSE = 210;
-export const CAR_TURN = 2.6;
-export const CAR_GRIP = 5.2;
-export const CAR_HEALTH = 100;
+export const TRAFFIC = { count: 16, minSpeed: 120, maxSpeed: 190, radius: 18 };
+export const PARKED = { count: 8 };
+export const TAXI = { count: 2 };
+export const PED_COUNT = 42;
+export const COP_CAR_MAX = 5;
 
-// The law: heat runs 0..500, a star per 100.
-export const HEAT_MAX = 500;
-export const HEAT_PER_STAR = 100;
-export const HEAT_STEAL = 60;
-export const HEAT_HIT_PED = 45;
-export const HEAT_PUNCH_COP = 90;
-export const HEAT_RAM_COP = 70;
-export const HEAT_DECAY = 5;
-export const HEAT_DECAY_SAFEHOUSE = 16;
-export const BUST_FINE = 150;
-export const WASTED_FEE = 200;
-export const MAX_COP_CARS = 5;
-export const MAX_FOOT_COPS = 2;
+/** Heat points at which each wanted star appears (index = stars - 1). */
+export const STAR_HEAT = [1, 40, 80, 120, 180];
+export const HEAT_MAX = 300;
+export const HEAT_DECAY = 3;
+export const HEAT = {
+  stealCar: 40,
+  hitPed: 25,
+  punchCop: 50,
+  ramCopCar: 30,
+  killPed: 60,
+};
 
-// Missions for Mara Voss, the fixer.
+export const FINES = { busted: 100, wasted: 100 };
+export const STASH_VALUE = 150;
+
 export const MISSIONS = [
   {
+    id: 'hot-wheels',
     name: 'Hot Wheels',
+    giver: 'Mara Voss',
     brief: 'Steal a car and bring it to the Marina.',
     reward: 300,
-    target: PLACES.marina,
-    targetName: 'MARINA',
+    target: { x: 2900, y: 500, label: 'MARINA' },
   },
   {
+    id: 'the-package',
     name: 'The Package',
-    brief: 'Timed delivery: docks to the Solmara Tower. 100 seconds.',
+    giver: 'Mara Voss',
+    brief: 'Timed delivery: docks to Solmara Tower. Do not be late.',
     reward: 600,
-    target: PLACES.tower,
-    targetName: 'SOLMARA TOWER',
-    timeLimit: 100,
-    startAt: PLACES.docks,
+    start: { x: 3100, y: 420, label: 'DOCKS' },
+    target: { x: 1700, y: 1000, label: 'SOLMARA TOWER' },
+    timeLimit: 90,
   },
   {
+    id: 'heat-wave',
     name: 'Heat Wave',
-    brief: 'Lose a 3-star wanted level at the safehouse.',
+    giver: 'Mara Voss',
+    brief: 'Get a 3-star wanted level, then lose the cops at the safehouse.',
     reward: 900,
-    target: PLACES.safehouse,
-    targetName: 'SAFEHOUSE',
-    wantedOnStart: 300,
+    target: { x: 2700, y: 2050, label: 'SAFEHOUSE' },
+    needStars: 3,
   },
 ];
 
-export const STASH_COUNT = 10;
-export const STASH_REWARD = 150;
-export const TRAFFIC_COUNT = 16;
-export const PED_COUNT = 42;
-
-// Sun-soaked palette: warm asphalt, terracotta roofs, turquoise sea.
-export const COLORS = {
-  road: '#4a4a52',
-  roadEdge: '#33333a',
-  dash: '#e8d44d',
-  sidewalk: '#b9ac93',
-  sea: '#2f8fae',
-  seaDeep: '#1f6f8e',
-  beach: '#e6d199',
-  grass: '#7fae5a',
-  grassDark: '#6b9c4a',
-  pond: '#5fb2d4',
-  buildingRoof: ['#c96f4a', '#b45a3c', '#d08a4e', '#8a6f8d', '#7d8aa0', '#a8815a', '#96504a'],
-  buildingEdge: '#5c4632',
-  tree: '#4d8a3f',
-  treeDark: '#3c7031',
-  player: '#ff5d8f',
-  playerRing: '#ffffff',
-  copCar: '#20242e',
-  copLightR: '#ff3b30',
-  copLightB: '#2f7bff',
-  taxi: '#f5c518',
-  gold: '#ffd94a',
-  hudBg: 'rgba(12, 14, 20, 0.72)',
-  hudText: '#ffffff',
-  hudDim: '#cfd3dc',
+export const PLACES = {
+  policeHQ: { x: 1500, y: 1000, label: 'POLICE HQ' },
+  hospital: { x: 1900, y: 1750, label: 'HOSPITAL' },
+  tower: { x: 1700, y: 1000, label: 'SOLMARA TOWER' },
+  marina: { x: 2900, y: 500, label: 'MARINA' },
+  docks: { x: 3100, y: 420, label: 'DOCKS' },
+  safehouse: { x: 2700, y: 2050, label: 'SAFEHOUSE' },
+  park: { x: 800, y: 1700, label: 'PALM PARK' },
+  spawn: { x: 1500, y: 1250 },
 };
+
+export const DISTRICTS = [
+  { name: 'Downtown', x0: 1100, y0: 650, x1: 2300, y1: 1350, tint: '#3a4152' },
+  { name: 'Old Town', x0: 300, y0: 300, x1: 1100, y1: 1000, tint: '#4a3f35' },
+  { name: 'Marina', x0: 2300, y0: 300, x1: 3300, y1: 1000, tint: '#2f4256' },
+  { name: 'Suburbs', x0: 300, y0: 1350, x1: 1500, y1: 2350, tint: '#3d4a35' },
+  { name: 'Palm Beach', x0: 2300, y0: 1350, x1: 3600, y1: 2600, tint: '#54452f' },
+];
+
+/** Vertical avenues and horizontal streets (centre lines); roads are 64 wide. */
+export const ROADS_X = [300, 700, 1100, 1500, 1900, 2300, 2700, 3100];
+export const ROADS_Y = [300, 650, 1000, 1350, 1700, 2050, 2350];
+export const ROAD_W = 64;
+
+/** The sea starts here (east edge); the sand runs just west of it. Water is solid. */
+export const SEA_X = 3450;
+export const BEACH_X = 3300;
+
+export const PALETTE = {
+  grass: '#4d7a3a',
+  grassDark: '#436e33',
+  road: '#33373f',
+  roadLine: '#c9a227',
+  sidewalk: '#6b6f75',
+  building: '#7d7468',
+  buildingRoof: '#5d564c',
+  buildingDowntown: '#8a7f8a',
+  water: '#2b6cb0',
+  sand: '#d9c27a',
+  park: '#3f7a34',
+  pond: '#3a7ca8',
+  tree: '#2f6b2a',
+  treeDark: '#265824',
+  player: '#ff5fa2',
+  playerRing: '#ffffff',
+  car: '#e8b73a',
+  taxi: '#f2c94c',
+  police: '#3a6fd8',
+  ped: '#cfd6dd',
+  cop: '#2f5fd0',
+  stash: '#39d353',
+  marker: '#39d353',
+  gold: '#f2c94c',
+  red: '#e5534b',
+  panel: 'rgba(12, 16, 24, 0.82)',
+  text: '#eef1f5',
+  muted: '#9aa3b0',
+};
+
+export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
+
+/** Where the save is kept between visits (this browser only). */
+export const SAVE_KEY = 'solmara.save.v1';

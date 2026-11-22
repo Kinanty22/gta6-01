@@ -1,887 +1,853 @@
-// Solmara's rules and state, with no drawing and no browser in it: the player on
-// foot and behind the wheel, traffic, pedestrians, the police, the wanted level,
-// Mara Voss's three missions and the hidden cash. step() advances one fixed step
-// and returns what happened as bit flags, so the caller can play sounds and save
-// without the world knowing about screens or audio.
+// SOLMARA's world: the city, its people and cars, the wanted system, the
+// missions, and the fixed-step simulation. The city is built once per world;
+// reset() only deals a fresh set of people, cars and missions, so a restart
+// keeps the same streets.
 import {
-  AVENUES, BEACH_Y, BUST_FINE, CAR_ACCEL, CAR_BRAKE, CAR_GRIP, CAR_HEALTH,
-  CAR_LENGTH, CAR_MAX_REVERSE, CAR_MAX_SPEED, CAR_TURN, CAR_WIDTH, COLORS,
-  HEAT_DECAY, HEAT_DECAY_SAFEHOUSE, HEAT_HIT_PED, HEAT_MAX, HEAT_PUNCH_COP,
-  HEAT_RAM_COP, HEAT_STEAL, MAX_COP_CARS, MAX_FOOT_COPS, MISSIONS, PED_COUNT,
-  PLACES, PLAYER_HEALTH, PLAYER_RADIUS, PUNCH_COOLDOWN, PUNCH_DAMAGE,
-  PUNCH_RANGE, RUN_SPEED, SEA_Y, STASH_COUNT, STASH_REWARD, STREETS,
-  TRAFFIC_COUNT, WALK_SPEED, WASTED_FEE, WORLD,
+  WORLD, PLAYER, CAR, PED, TRAFFIC, PARKED, TAXI, PED_COUNT, COP_CAR_MAX,
+  STAR_HEAT, HEAT_MAX, HEAT_DECAY, HEAT, FINES, STASH_VALUE, MISSIONS,
+  PLACES, ROADS_X, ROADS_Y, ROAD_W, SEA_X, BEACH_X,
 } from './config.js';
-import { buildCity, districtAt, inPond, inSea, nearestIntersection, onBeach, onRoad, pedSpawnPoints } from './city.js';
 
-export const EVENT_PUNCH = 1;
-export const EVENT_PICKUP = 2;
-export const EVENT_CRASH = 4;
-export const EVENT_STEAL = 8;
-export const EVENT_MISSION_DONE = 16;
-export const EVENT_MISSION_FAIL = 32;
-export const EVENT_BUSTED = 64;
-export const EVENT_WASTED = 128;
-export const EVENT_HIT_PED = 256;
+export const EVENT_NONE = 0;
+export const EVENT_MISSION = 1;
+export const EVENT_BUSTED = 2;
+export const EVENT_WASTED = 4;
+export const EVENT_WIN = 8;
+
+export const ACTION_ENTER_CAR = 4;
+export const ACTION_PUNCH = 8;
 
 const TAU = Math.PI * 2;
-
-function clamp(value, min, max) {
-  return value < min ? min : value > max ? max : value;
+function clamp(v, a, b) {
+  return Math.max(a, Math.min(b, v));
 }
-
-function angleDiff(a, b) {
-  let d = a - b;
-  while (d > Math.PI) d -= TAU;
-  while (d < -Math.PI) d += TAU;
-  return d;
-}
-
 function dist(ax, ay, bx, by) {
   return Math.hypot(ax - bx, ay - by);
 }
+function angleTo(ax, ay, bx, by) {
+  return Math.atan2(by - ay, bx - ax);
+}
+function angleLerp(a, b, t) {
+  let d = (b - a) % TAU;
+  if (d > Math.PI) d -= TAU;
+  if (d < -Math.PI) d += TAU;
+  return a + d * t;
+}
 
-/** Push a circle out of every building and out of the water; returns true if it hit anything. */
-function collideCircle(state, x, y, r) {
-  let hit = false;
-  for (const b of state.city.buildings) {
-    const cx = clamp(x, b.x, b.x + b.w);
-    const cy = clamp(y, b.y, b.y + b.h);
-    const dx = x - cx;
-    const dy = y - cy;
-    const d2 = dx * dx + dy * dy;
-    if (d2 < r * r) {
-      hit = true;
-      if (d2 > 0.0001) {
-        const d = Math.sqrt(d2);
-        const push = (r - d) / d;
-        x += dx * push;
-        y += dy * push;
-      } else {
-        y -= r;
+function buildCity(rng) {
+  const park = { x0: 550, y0: 1500, x1: 1100, y1: 2000, pond: { x: 825, y: 1750, rx: 120, ry: 70 } };
+  const buildings = [];
+  for (let i = 0; i < ROADS_X.length - 1; i += 1) {
+    for (let j = 0; j < ROADS_Y.length - 1; j += 1) {
+      const x0 = ROADS_X[i] + ROAD_W / 2 + 24;
+      const x1 = ROADS_X[i + 1] - ROAD_W / 2 - 24;
+      const y0 = ROADS_Y[j] + ROAD_W / 2 + 24;
+      const y1 = ROADS_Y[j + 1] - ROAD_W / 2 - 24;
+      if (x1 - x0 < 90 || y1 - y0 < 80) continue;
+      if (x1 > park.x0 && x0 < park.x1 && y1 > park.y0 && y0 < park.y1) continue;
+      if (x0 > BEACH_X - 60) continue;
+      const n = rng.int(1, 2);
+      for (let k = 0; k < n; k += 1) {
+        const w = rng.range(70, 150);
+        const h = rng.range(60, 120);
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+          const x = rng.range(x0, Math.max(x0, x1 - w));
+          const y = rng.range(y0, Math.max(y0, y1 - h));
+          if (buildings.some((o) => x < o.x + o.w + 20 && x + w + 20 > o.x && y < o.y + o.h + 20 && y + h + 20 > o.y)) continue;
+          buildings.push({ x, y, w, h, downtown: x > 1100 && x < 2300 && y > 650 && y < 1350 });
+          break;
+        }
       }
     }
   }
-  if (inSea(x, y)) {
-    y = SEA_Y - r;
-    hit = true;
+  const trees = [];
+  for (let i = 0; i < 130; i += 1) {
+    const x = rng.range(80, WORLD.width - 80);
+    const y = rng.range(80, WORLD.height - 80);
+    if (x > SEA_X - 40) continue;
+    trees.push({ x, y, s: rng.range(10, 18) });
   }
-  if (inPond(x, y)) {
-    const dx = x - 1200;
-    const dy = y - 925;
-    const len = Math.hypot(dx, dy) || 1;
-    x = 1200 + (dx / len) * 132;
-    y = 925 + (dy / len) * 80;
-    hit = true;
-  }
-  return { x, y, hit };
+  return { buildings, trees, park };
 }
 
-const TRAFFIC_COLORS = ['#d8d8d8', '#c94f4f', '#4f7ec9', '#5aa85a', '#c9a24f', '#8a6fbf', '#d0d0d0', '#3f6f6f'];
-const PED_COLORS = ['#e8e0c8', '#7fb2d9', '#d98a7f', '#9fd49f', '#d9c27f', '#b08ac9', '#e0e0e0', '#c98a4f'];
-const PED_NAMES = ['Rosa', 'Dario', 'Lena', 'Marco', 'Ivy', 'Tomas', 'Nia', 'Felix', 'Ada', 'Bruno'];
+function roadPoint(rng) {
+  if (rng.chance(0.5)) return { x: rng.pick(ROADS_X), y: rng.range(200, WORLD.height - 200) };
+  return { x: rng.range(200, BEACH_X - 100), y: rng.pick(ROADS_Y) };
+}
 
-export function createWorld(random) {
-  const city = buildCity(random);
+export function createWorld(rng) {
+  const city = buildCity(rng);
   const state = {
     time: 0,
+    cityRef: city,
     cash: 0,
-    health: PLAYER_HEALTH,
     heat: 0,
-    player: null,
+    stars: 0,
+    lastCrime: -99,
+    player: { x: PLACES.spawn.x, y: PLACES.spawn.y, angle: 0, hp: PLAYER.maxHealth, inCar: false, carId: -1, punchT: 0, running: false },
     cars: [],
     peds: [],
     cops: [],
-    particles: [],
-    messages: [],
+    stashes: [],
     missionIndex: 0,
-    mission: null,
-    missionsDone: [false, false, false],
-    stashesTaken: 0,
-    city,
-    camera: { x: PLACES.start.x, y: PLACES.start.y },
-    busted: 0,
-    wasted: 0,
-    win: false,
-    elapsed: 0,
-    copRamCooldown: 0,
-    copPunchCooldown: 0,
-    lastCrime: -100,
+    missionActive: false,
+    missionStage: 0,
+    missionTimer: 0,
+    missionDone: [false, false, false],
+    won: false,
+    messages: [],
+    sound: null,
+    copSpawnT: 0,
+    footSpawnT: 0,
   };
+  let nextCarId = 1;
 
-  function say(text) {
-    state.messages.push({ text, t: state.time });
-    if (state.messages.length > 8) state.messages.shift();
+  function addMessage(text) {
+    state.messages.push(text);
+    if (state.messages.length > 6) state.messages.shift();
+  }
+  function playSound(name) {
+    state.sound = name;
+  }
+  function starsFor(heat) {
+    let s = 0;
+    for (let i = 0; i < STAR_HEAT.length; i += 1) if (heat >= STAR_HEAT[i]) s = i + 1;
+    return s;
   }
 
-  function stars() {
-    return state.heat <= 0 ? 0 : Math.min(5, Math.ceil(state.heat / 100));
-  }
-
-  function addHeat(amount) {
-    state.heat = clamp(state.heat + amount, 0, HEAT_MAX);
-    state.lastCrime = state.time;
-  }
-
-  function makeCar(x, y, angle, opts) {
-    return {
-      x, y, angle, speed: 0,
-      health: CAR_HEALTH,
-      color: opts.color || '#d8d8d8',
-      taxi: !!opts.taxi,
-      parked: !!opts.parked,
-      isCop: !!opts.isCop,
-      isPlayer: false,
-      wrecked: false,
-      smoke: 0,
-      target: null,
-      stuck: 0,
-      kind: opts.kind || 'traffic',
-    };
-  }
-
-  function randomRoadPoint() {
-    if (random.next() < 0.5) {
-      return { x: random.pick(AVENUES), y: random.range(300, BEACH_Y - 100) };
+  function blocked(x, y, r) {
+    if (x < r || x > WORLD.width - r || y < r || y > WORLD.height - r) return true;
+    if (x > SEA_X - r) return true;
+    const p = city.park.pond;
+    const px = (x - p.x) / (p.rx + r);
+    const py = (y - p.y) / (p.ry + r);
+    if (px * px + py * py < 1) return true;
+    for (let i = 0; i < city.buildings.length; i += 1) {
+      const b = city.buildings[i];
+      if (x > b.x - r && x < b.x + b.w + r && y > b.y - r && y < b.y + b.h + r) return true;
     }
-    return { x: random.range(120, WORLD.w - 120), y: random.pick(STREETS) };
+    return false;
   }
 
-  function spawnTrafficCar() {
-    const p = randomRoadPoint();
-    const angle = random.next() < 0.5 ? 0 : Math.PI / 2;
-    const car = makeCar(p.x, p.y, angle, {
-      color: random.pick(TRAFFIC_COLORS),
-      taxi: random.next() < 0.18,
-      kind: 'traffic',
-    });
-    car.target = nearestIntersection(p.x + random.range(-600, 600), p.y + random.range(-600, 600));
+  function moveCircle(e, dx, dy, r) {
+    let hit = false;
+    const nx = e.x + dx;
+    if (!blocked(nx, e.y, r)) e.x = nx;
+    else hit = true;
+    const ny = e.y + dy;
+    if (!blocked(e.x, ny, r)) e.y = ny;
+    else hit = true;
+    return hit;
+  }
+
+  function spawnCar(kind) {
+    const p = roadPoint(rng);
+    const alongX = rng.chance(0.5);
+    const car = {
+      id: nextCarId,
+      x: p.x,
+      y: p.y,
+      angle: alongX ? (rng.chance(0.5) ? 0 : Math.PI) : rng.chance(0.5) ? Math.PI / 2 : -Math.PI / 2,
+      speed: 0,
+      color: '',
+      parked: false,
+      taxi: false,
+      police: false,
+      hp: CAR.maxHealth,
+      wrecked: false,
+      driver: 'traffic',
+      cruise: rng.range(TRAFFIC.minSpeed, TRAFFIC.maxSpeed),
+      tx: p.x,
+      ty: p.y,
+      dmgT: 0,
+      ramT: 0,
+      hitT: 0,
+    };
+    nextCarId += 1;
+    if (kind === 'parked') {
+      car.parked = true;
+      car.driver = null;
+      car.x = rng.pick(ROADS_X) + (rng.chance(0.5) ? 46 : -46);
+      car.y = rng.range(200, WORLD.height - 200);
+      car.angle = rng.chance(0.5) ? Math.PI / 2 : -Math.PI / 2;
+    } else if (kind === 'taxi') {
+      car.taxi = true;
+      car.cruise = TRAFFIC.maxSpeed;
+    }
+    const palette = ['#e8b73a', '#c94f43', '#4f8ac9', '#7a9a4f', '#b8bcc2', '#8a5fc9', '#d97b2f'];
+    car.color = car.taxi ? '#f2c94c' : rng.pick(palette);
+    car.tx = rng.pick(ROADS_X);
+    car.ty = rng.pick(ROADS_Y);
     state.cars.push(car);
     return car;
   }
 
-  function spawnParkedCars() {
-    const spots = [
-      { x: 1440, y: 640, angle: Math.PI / 2 },
-      { x: 1560, y: 760, angle: 0 },
-      { x: 2040, y: 1540, angle: Math.PI / 2 },
-      { x: 2760, y: 1090, angle: 0 },
-      { x: 960, y: 1840, angle: Math.PI / 2 },
-      { x: 3240, y: 1990, angle: 0 },
-    ];
-    for (const s of spots) {
-      state.cars.push(makeCar(s.x, s.y, s.angle, {
-        color: random.pick(TRAFFIC_COLORS),
-        parked: true,
-        kind: 'parked',
-      }));
-    }
+  function spawnPed() {
+    const p = roadPoint(rng);
+    state.peds.push({
+      x: clamp(p.x + rng.range(-50, 50), 40, BEACH_X - 40),
+      y: clamp(p.y + rng.range(-50, 50), 40, WORLD.height - 40),
+      angle: rng.range(0, TAU),
+      speed: rng.range(PED.minSpeed, PED.maxSpeed),
+      tx: p.x,
+      ty: p.y,
+      down: 0,
+      flee: 0,
+    });
   }
 
-  function spawnPeds() {
-    const points = pedSpawnPoints(random);
-    for (let i = 0; i < PED_COUNT; i += 1) {
-      const p = points[i];
-      state.peds.push({
-        x: p.x, y: p.y,
-        angle: random.range(0, TAU),
-        speed: random.range(42, 72),
-        color: random.pick(PED_COLORS),
-        name: random.pick(PED_NAMES),
-        wander: random.range(1, 4),
-        down: 0,
-        flee: 0,
-      });
+  function spawnStashes() {
+    state.stashes = [];
+    for (let i = 0; i < 10; i += 1) {
+      const onX = rng.chance(0.5);
+      const x = onX ? rng.pick(ROADS_X) + (rng.chance(0.5) ? 46 : -46) : rng.range(200, BEACH_X - 100);
+      const y = onX ? rng.range(200, WORLD.height - 200) : rng.pick(ROADS_Y) + (rng.chance(0.5) ? 46 : -46);
+      state.stashes.push({ x: clamp(x, 60, BEACH_X - 60), y: clamp(y, 60, WORLD.height - 60), taken: false });
     }
   }
 
   function reset() {
     state.time = 0;
     state.cash = 0;
-    state.health = PLAYER_HEALTH;
     state.heat = 0;
+    state.stars = 0;
+    state.lastCrime = -99;
+    state.player = { x: PLACES.spawn.x, y: PLACES.spawn.y, angle: 0, hp: PLAYER.maxHealth, inCar: false, carId: -1, punchT: 0, running: false };
     state.cars = [];
     state.peds = [];
     state.cops = [];
-    state.particles = [];
-    state.messages = [];
     state.missionIndex = 0;
-    state.mission = null;
-    state.missionsDone = [false, false, false];
-    state.stashesTaken = 0;
-    state.busted = 0;
-    state.wasted = 0;
-    state.win = false;
-    state.elapsed = 0;
-    state.copRamCooldown = 0;
-    state.copPunchCooldown = 0;
-    state.lastCrime = -100;
-    for (const s of city.stashes) s.taken = false;
-    state.player = {
-      x: PLACES.start.x, y: PLACES.start.y, angle: -Math.PI / 2,
-      inCar: null, punchCooldown: 0, invulnerable: 0, moving: false,
-    };
-    state.camera = { x: PLACES.start.x, y: PLACES.start.y };
-    for (let i = 0; i < TRAFFIC_COUNT; i += 1) spawnTrafficCar();
-    spawnParkedCars();
-    spawnPeds();
-    say('Welcome to Solmara. Mara Voss has work for you — press ENTER.');
+    state.missionActive = false;
+    state.missionStage = 0;
+    state.missionTimer = 0;
+    state.missionDone = [false, false, false];
+    state.won = false;
+    state.messages = [];
+    state.sound = null;
+    state.copSpawnT = 0;
+    state.footSpawnT = 0;
+    nextCarId = 1;
+    for (let i = 0; i < TRAFFIC.count; i += 1) spawnCar('traffic');
+    for (let i = 0; i < PARKED.count; i += 1) spawnCar('parked');
+    for (let i = 0; i < TAXI.count; i += 1) spawnCar('taxi');
+    for (let i = 0; i < PED_COUNT; i += 1) spawnPed();
+    spawnStashes();
+    addMessage('Welcome to Solmara. Press ENTER to take a job from Mara Voss.');
   }
 
-  function burst(x, y, color, count, speed) {
-    for (let i = 0; i < count; i += 1) {
-      if (state.particles.length > 220) return;
-      const a = random.range(0, TAU);
-      const v = random.range(speed * 0.3, speed);
-      state.particles.push({
-        x, y,
-        vx: Math.cos(a) * v, vy: Math.sin(a) * v,
-        life: random.range(0.4, 1.1), max: 1.1,
-        color, size: random.range(3, 7),
-      });
-    }
+  function addHeat(n) {
+    state.heat = clamp(state.heat + n, 0, HEAT_MAX);
+    state.lastCrime = state.time;
+    state.stars = starsFor(state.heat);
   }
 
   function playerCar() {
-    return state.player.inCar;
+    return state.cars.find((c) => c.id === state.player.carId) ?? null;
   }
 
-  function carCircles(car) {
-    const fx = Math.cos(car.angle);
-    const fy = Math.sin(car.angle);
-    return [
-      { x: car.x + fx * 15, y: car.y + fy * 15, r: 12 },
-      { x: car.x, y: car.y, r: 13 },
-      { x: car.x - fx * 15, y: car.y - fy * 15, r: 12 },
-    ];
-  }
-
-  function pushCarOutOfBuildings(car) {
-    let hit = false;
-    for (const c of carCircles(car)) {
-      for (const b of city.buildings) {
-        const cx = clamp(c.x, b.x, b.x + b.w);
-        const cy = clamp(c.y, b.y, b.y + b.h);
-        const dx = c.x - cx;
-        const dy = c.y - cy;
-        const d2 = dx * dx + dy * dy;
-        if (d2 < c.r * c.r) {
-          hit = true;
-          if (d2 > 0.0001) {
-            const d = Math.sqrt(d2);
-            const push = (c.r - d) / d;
-            car.x += dx * push;
-            car.y += dy * push;
-          } else {
-            car.y -= c.r;
-          }
-        }
-      }
-    }
-    if (car.y + 14 >= SEA_Y) {
-      car.y = SEA_Y - 14;
-      hit = true;
-    }
-    if (inPond(car.x, car.y)) {
-      const dx = car.x - 1200;
-      const dy = car.y - 925;
-      const len = Math.hypot(dx, dy) || 1;
-      car.x = 1200 + (dx / len) * 142;
-      car.y = 925 + (dy / len) * 88;
-      hit = true;
-    }
-    return hit;
-  }
-
-  function damageCar(car, amount, events) {
-    if (car.wrecked) return events;
-    car.health -= amount;
-    if (car.health <= 0) {
-      car.health = 0;
+  function damageCar(car, n) {
+    if (car.wrecked) return;
+    car.hp -= n;
+    if (car.hp <= 0) {
+      car.hp = 0;
       car.wrecked = true;
       car.speed = 0;
-      burst(car.x, car.y, '#ff8c1a', 26, 260);
-      burst(car.x, car.y, '#333333', 18, 120);
-      if (car.isPlayer) {
-        const p = state.player;
-        p.inCar = null;
-        car.isPlayer = false;
-        p.x = car.x + 40;
-        p.y = car.y;
-        say('Your car is wrecked!');
+      if (state.player.inCar && state.player.carId === car.id) {
+        state.player.inCar = false;
+        state.player.carId = -1;
+        state.player.x = clamp(car.x + 40, 30, WORLD.width - 30);
+        state.player.y = clamp(car.y, 30, WORLD.height - 30);
       }
-      return events | EVENT_CRASH;
+      playSound('crash');
+      addMessage('Car wrecked!');
     }
-    return events;
   }
 
-  function startMission(index) {
-    const def = MISSIONS[index];
-    if (!def || state.missionsDone[index]) return;
-    state.missionIndex = index;
-    state.mission = {
-      def, phase: def.startAt ? 'goto' : 'go',
-      timer: def.timeLimit || 0,
-      active: true,
-    };
-    if (def.wantedOnStart) addHeat(def.wantedOnStart);
-    say(`${def.name}: ${def.brief}`);
+  function startMission() {
+    if (state.missionActive || state.missionIndex > 2 || state.won) return false;
+    const m = MISSIONS[state.missionIndex];
+    state.missionActive = true;
+    state.missionStage = 0;
+    state.missionTimer = 0;
+    addMessage(`${m.name} — ${m.brief}`);
+    playSound('jingle');
+    return true;
   }
 
   function completeMission() {
-    const m = state.mission;
-    if (!m) return EVENT_MISSION_DONE;
-    const reward = m.def.reward;
-    state.cash += reward;
-    state.missionsDone[state.missionIndex] = true;
-    say(`${m.def.name} complete! +$${reward}`);
-    state.mission = null;
-    if (state.missionsDone.every(Boolean)) {
-      state.win = true;
-      say('All missions done — Solmara is yours. You win!');
-    } else if (state.missionIndex + 1 < MISSIONS.length) {
-      startMission(state.missionIndex + 1);
+    const m = MISSIONS[state.missionIndex];
+    state.cash += m.reward;
+    state.missionDone[state.missionIndex] = true;
+    state.missionActive = false;
+    state.missionIndex += 1;
+    addMessage(`${m.name} complete! +$${m.reward}`);
+    playSound('jingle');
+    if (state.missionIndex > 2) {
+      state.won = true;
+      addMessage('ALL MISSIONS COMPLETE — Solmara is yours!');
+      return EVENT_MISSION | EVENT_WIN;
     }
-    return EVENT_MISSION_DONE;
+    return EVENT_MISSION;
   }
 
-  function failMission(reason) {
-    say(`Mission failed: ${reason}. Press ENTER to retry.`);
-    state.mission = null;
-    return EVENT_MISSION_FAIL;
+  function failMission(text) {
+    state.missionActive = false;
+    addMessage(text);
   }
 
-  function bustPlayer() {
-    const fine = Math.min(state.cash, BUST_FINE);
-    state.cash -= fine;
+  function busted() {
+    state.cash = Math.max(0, state.cash - FINES.busted);
+    state.player.hp = PLAYER.maxHealth;
+    state.player.inCar = false;
+    state.player.carId = -1;
+    state.player.x = PLACES.policeHQ.x;
+    state.player.y = PLACES.policeHQ.y;
     state.heat = 0;
-    state.health = PLAYER_HEALTH;
-    state.busted = 2.5;
-    const p = state.player;
-    if (p.inCar) {
-      p.inCar.isPlayer = false;
-      p.inCar = null;
-    }
-    p.x = PLACES.policeHq.x;
-    p.y = PLACES.policeHq.y;
+    state.stars = 0;
+    state.cars = state.cars.filter((c) => !c.police);
     state.cops = [];
-    state.cars = state.cars.filter((c) => !c.isCop);
-    say(`Busted! Fine $${fine}. The cops let you off at HQ.`);
+    addMessage(`BUSTED! -$${FINES.busted} fine. Released at Police HQ.`);
+    playSound('busted');
     return EVENT_BUSTED;
   }
 
-  function wastePlayer() {
-    const fee = Math.min(state.cash, WASTED_FEE);
-    state.cash -= fee;
-    state.heat = 0;
-    state.health = PLAYER_HEALTH;
-    state.wasted = 2.5;
-    const p = state.player;
-    if (p.inCar) {
-      p.inCar.isPlayer = false;
-      p.inCar = null;
-    }
-    p.x = PLACES.hospital.x;
-    p.y = PLACES.hospital.y;
-    say(`Wasted! Hospital bill $${fee}.`);
+  function wasted() {
+    state.cash = Math.max(0, state.cash - FINES.wasted);
+    state.player.hp = PLAYER.maxHealth;
+    state.player.inCar = false;
+    state.player.carId = -1;
+    state.player.x = PLACES.hospital.x;
+    state.player.y = PLACES.hospital.y;
+    state.heat = Math.floor(state.heat / 2);
+    state.stars = starsFor(state.heat);
+    state.cars = state.cars.filter((c) => !c.police);
+    state.cops = [];
+    addMessage(`WASTED! -$${FINES.wasted} fine. You wake up at the hospital.`);
+    playSound('wasted');
     return EVENT_WASTED;
   }
 
-  function driveCar(car, throttle, steer, dt, handbrake) {
-    const top = car.isCop ? 540 : CAR_MAX_SPEED;
-    if (throttle > 0) car.speed += CAR_ACCEL * throttle * dt;
-    else if (throttle < 0) {
-      if (car.speed > 0) car.speed -= CAR_BRAKE * dt;
-      else car.speed += CAR_ACCEL * 0.6 * dt;
-    }
-    if (car.speed > top) car.speed = top;
-    if (car.speed < -CAR_MAX_REVERSE) car.speed = -CAR_MAX_REVERSE;
-    // Drag and rolling resistance, heavier on sand.
-    const sand = onBeach(car.x, car.y) ? 1.6 : 1;
-    car.speed -= car.speed * 0.35 * sand * dt;
-    if (Math.abs(car.speed) < 2 && throttle === 0) car.speed = 0;
-    const grip = handbrake ? 1.4 : CAR_GRIP;
-    const turnRate = CAR_TURN * clamp(Math.abs(car.speed) / 220, 0, 1) * (handbrake ? 1.5 : 1);
-    car.angle += steer * turnRate * dt * (car.speed >= 0 ? 1 : -1);
-    car.x += Math.cos(car.angle) * car.speed * dt;
-    car.y += Math.sin(car.angle) * car.speed * dt;
-    car.x = clamp(car.x, 20, WORLD.w - 20);
-    car.y = clamp(car.y, 20, WORLD.h - 20);
-    return grip;
-  }
-
-  function steerToward(car, tx, ty) {
-    const want = Math.atan2(ty - car.y, tx - car.x);
-    return clamp(angleDiff(want, car.angle) * 2.2, -1, 1);
-  }
-
-  function nextWaypoint(car) {
-    // Pick a neighbouring intersection that gets closer to the player's block.
-    const ix = nearestIntersection(state.player.x, state.player.y);
-    const here = nearestIntersection(car.x, car.y);
-    const options = [];
-    for (const ax of AVENUES) options.push({ x: ax, y: here.y });
-    for (const sy of STREETS) options.push({ x: here.x, y: sy });
-    let best = options[0];
-    let bestD = Infinity;
-    for (const o of options) {
-      if (o.x === here.x && o.y === here.y) continue;
-      const d = dist(o.x, o.y, ix.x, ix.y) + random.range(0, 120);
+  function nearestCar(x, y, maxD) {
+    let best = null;
+    let bestD = maxD;
+    for (const c of state.cars) {
+      if (c.wrecked) continue;
+      const d = dist(x, y, c.x, c.y);
       if (d < bestD) {
         bestD = d;
-        best = o;
+        best = c;
       }
     }
-    car.target = best;
+    return best;
+  }
+
+  function updatePlayer(dt, controls) {
+    const p = state.player;
+    if (p.punchT > 0) p.punchT -= dt;
+    if (p.inCar) {
+      const car = playerCar();
+      if (!car) {
+        p.inCar = false;
+        p.carId = -1;
+        return;
+      }
+      const d = controls.drive;
+      if (d.throttle > 0) car.speed += CAR.accel * dt;
+      else if (d.throttle < 0) {
+        if (car.speed > 10) car.speed -= CAR.brake * dt;
+        else car.speed -= CAR.accel * 0.5 * dt;
+      }
+      if (d.handbrake) car.speed -= Math.sign(car.speed) * 900 * dt;
+      car.speed -= car.speed * 0.5 * dt;
+      let max = CAR.maxSpeed;
+      if (car.x > BEACH_X) max = 260;
+      car.speed = clamp(car.speed, -CAR.reverseMax, max);
+      const steerAuthority = clamp(Math.abs(car.speed) / 200, 0, 1) * (car.speed < 0 ? -1 : 1);
+      car.angle += d.steer * CAR.steer * dt * steerAuthority * (d.handbrake ? 1.6 : 1);
+      const hit = moveCircle(car, Math.cos(car.angle) * car.speed * dt, Math.sin(car.angle) * car.speed * dt, CAR.radius);
+      if (hit && Math.abs(car.speed) > 180) {
+        damageCar(car, (Math.abs(car.speed) - 180) / 12);
+        playSound('crash');
+        car.speed *= 0.4;
+      } else if (hit) {
+        car.speed *= 0.5;
+      }
+      p.x = car.x;
+      p.y = car.y;
+      p.angle = car.angle;
+      return;
+    }
+    const mv = controls.move;
+    const len = Math.hypot(mv.x, mv.y);
+    if (len > 0) {
+      const sp = controls.run ? PLAYER.runSpeed : PLAYER.walkSpeed;
+      p.running = controls.run;
+      p.angle = Math.atan2(mv.y, mv.x);
+      moveCircle(p, (mv.x / len) * sp * dt, (mv.y / len) * sp * dt, PLAYER.radius);
+    } else {
+      p.running = false;
+    }
   }
 
   function updateTraffic(dt) {
     for (const car of state.cars) {
-      if (car.isPlayer || car.wrecked || car.isCop || car.parked) continue;
-      if (!car.target || dist(car.x, car.y, car.target.x, car.target.y) < 70) {
-        car.target = nearestIntersection(car.x + random.range(-700, 700), car.y + random.range(-700, 700));
+      if (car.driver !== 'traffic' && car.driver !== 'taxi') continue;
+      if (car.wrecked) continue;
+      const dx = car.tx - car.x;
+      const dy = car.ty - car.y;
+      if (Math.abs(dx) < 24 && Math.abs(dy) < 24) {
+        car.tx = rng.pick(ROADS_X);
+        car.ty = rng.pick(ROADS_Y);
+        continue;
       }
-      // Ease off when another car is right ahead.
-      let blocked = false;
+      let blockedAhead = false;
       for (const other of state.cars) {
         if (other === car || other.wrecked) continue;
-        const dx = other.x - car.x;
-        const dy = other.y - car.y;
-        const ahead = dx * Math.cos(car.angle) + dy * Math.sin(car.angle);
-        if (ahead > 0 && ahead < 64 && Math.abs(-dx * Math.sin(car.angle) + dy * Math.cos(car.angle)) < 26) {
-          blocked = true;
+        const ox = other.x - car.x;
+        const oy = other.y - car.y;
+        const along = ox * Math.cos(car.angle) + oy * Math.sin(car.angle);
+        const side = Math.abs(-ox * Math.sin(car.angle) + oy * Math.cos(car.angle));
+        if (along > 0 && along < 64 && side < 30) {
+          blockedAhead = true;
           break;
         }
       }
-      const throttle = blocked ? 0 : 0.55;
-      driveCar(car, throttle, steerToward(car, car.target.x, car.target.y), dt, false);
-      if (Math.abs(car.speed) < 8) {
-        car.stuck += dt;
-        if (car.stuck > 4) {
-          const p = randomRoadPoint();
-          car.x = p.x;
-          car.y = p.y;
-          car.angle = 0;
-          car.speed = 0;
-          car.stuck = 0;
-        }
+      const speed = blockedAhead ? 0 : car.cruise;
+      let stepX = 0;
+      let stepY = 0;
+      if (Math.abs(dx) > 24) {
+        stepX = Math.sign(dx) * speed * dt;
+        car.angle = angleLerp(car.angle, dx > 0 ? 0 : Math.PI, 0.2);
       } else {
-        car.stuck = 0;
+        stepY = Math.sign(dy) * speed * dt;
+        car.angle = angleLerp(car.angle, dy > 0 ? Math.PI / 2 : -Math.PI / 2, 0.2);
       }
-      if (pushCarOutOfBuildings(car)) car.speed *= 0.4;
+      const hit = moveCircle(car, stepX, stepY, CAR.radius);
+      if (hit) {
+        car.tx = rng.pick(ROADS_X);
+        car.ty = rng.pick(ROADS_Y);
+      }
+      car.speed = speed;
     }
   }
 
-  function updatePeds(dt, events) {
-    const pc = playerCar();
+  function updatePeds(dt) {
+    const p = state.player;
+    const pc = p.inCar ? playerCar() : null;
     for (const ped of state.peds) {
       if (ped.down > 0) {
         ped.down -= dt;
         continue;
       }
-      ped.wander -= dt;
-      // Flee a fast car bearing down on them.
-      let fleeX = 0;
-      let fleeY = 0;
-      if (pc && Math.abs(pc.speed) > 120) {
-        const d = dist(ped.x, ped.y, pc.x, pc.y);
-        if (d < 130) {
-          fleeX = (ped.x - pc.x) / d;
-          fleeY = (ped.y - pc.y) / d;
-          ped.flee = 1.2;
-        }
+      let tx = ped.tx;
+      let ty = ped.ty;
+      let speed = ped.speed;
+      if (pc && Math.abs(pc.speed) > 200 && dist(ped.x, ped.y, pc.x, pc.y) < 110) {
+        const a = angleTo(pc.x, pc.y, ped.x, ped.y);
+        tx = ped.x + Math.cos(a) * 200;
+        ty = ped.y + Math.sin(a) * 200;
+        speed = ped.speed * 2.2;
+      } else if (p.inCar === false && dist(ped.x, ped.y, p.x, p.y) < 60 && Math.abs(p.x - ped.x) + Math.abs(p.y - ped.y) < 90) {
+        const a = angleTo(p.x, p.y, ped.x, ped.y);
+        tx = ped.x + Math.cos(a) * 200;
+        ty = ped.y + Math.sin(a) * 200;
+        speed = ped.speed * 2;
       }
-      if (ped.flee > 0) {
-        ped.flee -= dt;
-        ped.angle = Math.atan2(fleeY, fleeX);
-      } else if (ped.wander <= 0) {
-        ped.wander = random.range(1.5, 5);
-        ped.angle = random.range(0, TAU);
-      }
-      const speed = ped.flee > 0 ? ped.speed * 2.1 : ped.speed;
-      const nx = ped.x + Math.cos(ped.angle) * speed * dt;
-      const ny = ped.y + Math.sin(ped.angle) * speed * dt;
-      const fixed = collideCircle(state, nx, ny, 10);
-      if (fixed.hit) {
-        ped.angle = random.range(0, TAU);
-      } else {
-        ped.x = nx;
-        ped.y = ny;
-      }
-      ped.x = clamp(ped.x, 20, WORLD.w - 20);
-      ped.y = clamp(ped.y, 20, BEACH_Y - 6);
-      // Run over by the player's car.
-      if (pc && Math.abs(pc.speed) > 80 && dist(ped.x, ped.y, pc.x, pc.y) < 26) {
-        ped.down = 2.5;
-        burst(ped.x, ped.y, '#ff5d5d', 10, 140);
-        addHeat(HEAT_HIT_PED);
-        say(`You hit ${ped.name}! The law noticed.`);
-        events |= EVENT_HIT_PED | EVENT_CRASH;
-      }
-    }
-    return events;
-  }
-
-  function updateCops(dt, events) {
-    const want = stars();
-    const wantedCars = want > 0 ? Math.min(1 + want, MAX_COP_CARS) : 0;
-    const activeCopCars = state.cars.filter((c) => c.isCop && !c.wrecked);
-    if (activeCopCars.length < wantedCars) {
-      // Spawn on a road far from the player.
-      let px;
-      let py;
-      let guard = 0;
-      do {
-        const p = randomRoadPoint();
-        px = p.x;
-        py = p.y;
-        guard += 1;
-      } while (dist(px, py, state.player.x, state.player.y) < 750 && guard < 12);
-      const cop = makeCar(px, py, 0, { color: COLORS.copCar, isCop: true, kind: 'cop' });
-      cop.target = nearestIntersection(state.player.x, state.player.y);
-      state.cars.push(cop);
-      if (want >= 3) say('Police are closing in!');
-    }
-    const pc = playerCar();
-    for (const cop of state.cars) {
-      if (!cop.isCop || cop.wrecked) continue;
-      const dPlayer = dist(cop.x, cop.y, state.player.x, state.player.y);
-      if (want === 0 || dPlayer > 1600) {
-        // Called off: drive away and leave.
-        if (want === 0) {
-          state.cars = state.cars.filter((c) => c !== cop);
-          continue;
-        }
-      }
-      if (dPlayer < 170 && pc) {
-        // Ram the player's car.
-        driveCar(cop, 1, steerToward(cop, state.player.x, state.player.y), dt, false);
-      } else {
-        if (!cop.target || dist(cop.x, cop.y, cop.target.x, cop.target.y) < 70) nextWaypoint(cop);
-        driveCar(cop, 0.9, steerToward(cop, cop.target.x, cop.target.y), dt, false);
-      }
-      if (pushCarOutOfBuildings(cop)) cop.speed *= 0.5;
-      // Ramming the player's car.
-      if (pc && dPlayer < 42 && state.copRamCooldown <= 0) {
-        state.copRamCooldown = 1.2;
-        const impact = Math.abs(cop.speed) + Math.abs(pc.speed);
-        events = damageCar(pc, impact / 14, events);
-        cop.speed *= -0.3;
-        pc.speed *= 0.55;
-        burst(pc.x, pc.y, '#ffd94a', 12, 200);
-        addHeat(HEAT_RAM_COP);
-        say('A cop car rammed you!');
-        events |= EVENT_CRASH;
-      }
-      // Cop cars that are far away and unwanted despawn quietly.
-      if (dPlayer > 1700 && want === 0) state.cars = state.cars.filter((c) => c !== cop);
-    }
-    state.copRamCooldown = Math.max(0, state.copRamCooldown - dt);
-
-    // Foot cops: only once the heat is real, and only up to two at a time.
-    if (want >= 2 && state.cops.length < MAX_FOOT_COPS && random.next() < dt * 0.5) {
-      state.cops.push({
-        x: PLACES.policeHq.x + random.range(-40, 40),
-        y: PLACES.policeHq.y + random.range(-40, 40),
-        angle: 0, bust: 0, punch: 0,
-      });
-      say('Foot patrol is on you!');
-    }
-    const p = state.player;
-    for (const cop of state.cops) {
-      const d = dist(cop.x, cop.y, p.x, p.y);
-      cop.angle = Math.atan2(p.y - cop.y, p.x - cop.x);
-      if (p.inCar) {
-        // A foot cop cannot catch a car: jog back toward HQ.
-        cop.x += Math.cos(Math.atan2(PLACES.policeHq.y - cop.y, PLACES.policeHq.x - cop.x)) * 120 * dt;
-        cop.y += Math.sin(Math.atan2(PLACES.policeHq.y - cop.y, PLACES.policeHq.x - cop.x)) * 120 * dt;
-        cop.bust = 0;
+      const dx = tx - ped.x;
+      const dy = ty - ped.y;
+      const d = Math.hypot(dx, dy);
+      if (d < 16) {
+        const np = roadPoint(rng);
+        ped.tx = clamp(np.x + rng.range(-50, 50), 40, BEACH_X - 40);
+        ped.ty = clamp(np.y + rng.range(-50, 50), 40, WORLD.height - 40);
         continue;
       }
-      const nx = cop.x + Math.cos(cop.angle) * 238 * dt;
-      const ny = cop.y + Math.sin(cop.angle) * 238 * dt;
-      const fixed = collideCircle(state, nx, ny, 12);
-      cop.x = fixed.x;
-      cop.y = fixed.y;
-      if (d < 30) {
-        cop.bust += dt;
-        cop.punch -= dt;
-        if (cop.punch <= 0) {
-          cop.punch = 0.85;
-          state.health -= 8;
-          burst(p.x, p.y, '#ffffff', 6, 120);
-          say('A cop is beating you down!');
-          if (state.health <= 0) return { events: wastePlayer(), done: true };
-        }
-        if (cop.bust > 1.2) return { events: bustPlayer(), done: true };
+      ped.angle = angleLerp(ped.angle, Math.atan2(dy, dx), 0.15);
+      moveCircle(ped, (dx / d) * speed * dt, (dy / d) * speed * dt, PED.radius);
+    }
+  }
+
+  function nearestRoadPoint(x, y) {
+    let bx = ROADS_X[0];
+    let bd = Math.abs(x - bx);
+    for (const rx of ROADS_X) if (Math.abs(x - rx) < bd) {
+      bd = Math.abs(x - rx);
+      bx = rx;
+    }
+    let by = ROADS_Y[0];
+    bd = Math.abs(y - by);
+    for (const ry of ROADS_Y) if (Math.abs(y - ry) < bd) {
+      bd = Math.abs(y - ry);
+      by = ry;
+    }
+    return { x: bx, y: by };
+  }
+
+  function spawnCopCar() {
+    const p = state.player;
+    const spots = [];
+    for (const rx of ROADS_X) {
+      for (const ry of ROADS_Y) {
+        const d = dist(rx, ry, p.x, p.y);
+        if (d > 420 && d < 900) spots.push({ x: rx, y: ry });
+      }
+    }
+    if (spots.length === 0) return;
+    const s = spots[Math.floor(rng.next() * spots.length)];
+    const car = {
+      id: nextCarId,
+      x: s.x,
+      y: s.y,
+      angle: 0,
+      speed: 0,
+      color: '#3a6fd8',
+      parked: false,
+      taxi: false,
+      police: true,
+      hp: CAR.maxHealth,
+      wrecked: false,
+      driver: 'cop',
+      cruise: 380,
+      tx: p.x,
+      ty: p.y,
+      repick: 0,
+      dmgT: 0,
+      ramT: 0,
+      hitT: 0,
+    };
+    nextCarId += 1;
+    state.cars.push(car);
+  }
+
+  function updateCopCars(dt) {
+    const p = state.player;
+    for (const car of state.cars) {
+      if (car.driver !== 'cop' || car.wrecked) continue;
+      const dx = p.x - car.x;
+      const dy = p.y - car.y;
+      const d = Math.hypot(dx, dy);
+      car.repick -= dt;
+      if (d < 170) {
+        // Close in: ram the player straight on.
+        car.angle = angleLerp(car.angle, Math.atan2(dy, dx), 0.25);
+        car.speed = 430;
+        moveCircle(car, Math.cos(car.angle) * car.speed * dt, Math.sin(car.angle) * car.speed * dt, CAR.radius);
       } else {
-        cop.bust = 0;
-      }
-    }
-    return { events, done: false };
-  }
-
-  function updateParticles(dt) {
-    for (let i = state.particles.length - 1; i >= 0; i -= 1) {
-      const pt = state.particles[i];
-      pt.life -= dt;
-      pt.x += pt.vx * dt;
-      pt.y += pt.vy * dt;
-      if (pt.life <= 0) state.particles.splice(i, 1);
-    }
-  }
-
-  function checkStash(events) {
-    const p = state.player;
-    if (p.inCar) return events;
-    for (const s of city.stashes) {
-      if (!s.taken && dist(p.x, p.y, s.x, s.y) < 28) {
-        s.taken = true;
-        state.stashesTaken += 1;
-        state.cash += STASH_REWARD;
-        burst(s.x, s.y, COLORS.gold, 14, 160);
-        say(`Cash stash found! +$${STASH_REWARD}`);
-        events |= EVENT_PICKUP;
-      }
-    }
-    return events;
-  }
-
-  function checkMission(dt, events) {
-    const m = state.mission;
-    if (!m || !m.active) return events;
-    const p = state.player;
-    const pc = playerCar();
-    if (m.def.timeLimit && m.phase === 'timed') {
-      m.timer -= dt;
-      if (m.timer <= 0) return failMission('the delivery was too slow');
-    }
-    if (state.missionIndex === 0) {
-      if (pc && dist(p.x, p.y, m.def.target.x, m.def.target.y) < 110) {
-        return completeMission();
-      }
-    } else if (state.missionIndex === 1) {
-      if (m.phase === 'goto') {
-        if (dist(p.x, p.y, m.def.startAt.x, m.def.startAt.y) < 100) {
-          m.phase = 'timed';
-          m.timer = m.def.timeLimit;
-          say('Package picked up! 100 seconds to the Tower — go!');
+        if (car.repick <= 0) {
+          const near = nearestRoadPoint(p.x, p.y);
+          car.tx = near.x;
+          car.ty = near.y;
+          car.repick = 2;
         }
-      } else if (pc && dist(p.x, p.y, m.def.target.x, m.def.target.y) < 110) {
-        return completeMission();
+        const tdx = car.tx - car.x;
+        const tdy = car.ty - car.y;
+        let stepX = 0;
+        let stepY = 0;
+        if (Math.abs(tdx) > 24) {
+          stepX = Math.sign(tdx) * car.cruise * dt;
+          car.angle = angleLerp(car.angle, tdx > 0 ? 0 : Math.PI, 0.2);
+        } else {
+          stepY = Math.sign(tdy) * car.cruise * dt;
+          car.angle = angleLerp(car.angle, tdy > 0 ? Math.PI / 2 : -Math.PI / 2, 0.2);
+        }
+        const hit = moveCircle(car, stepX, stepY, CAR.radius);
+        if (hit) car.repick = 0;
+        car.speed = car.cruise;
+      }
+      // Ramming the player: damage is rate-limited, or a touch would shred
+      // a car in under a second of contact.
+      if (p.inCar) {
+        const pc = playerCar();
+        if (pc && dist(car.x, car.y, pc.x, pc.y) < 46 && car.ramT <= 0) {
+          damageCar(pc, 5);
+          damageCar(car, 3);
+          car.speed *= 0.5;
+          car.ramT = 0.6;
+        }
+      } else if (dist(car.x, car.y, p.x, p.y) < 40 && car.hitT <= 0) {
+        p.hp -= 12;
+        playSound('crash');
+        const a = angleTo(car.x, car.y, p.x, p.y);
+        moveCircle(p, Math.cos(a) * 60, Math.sin(a) * 60, PLAYER.radius);
+        car.speed *= 0.3;
+        car.hitT = 0.8;
+      }
+      if (car.hp <= 0 && !car.wrecked) {
+        car.wrecked = true;
+        car.speed = 0;
+      }
+    }
+  }
+
+  function updateFootCops(dt) {
+    const p = state.player;
+    for (const cop of state.cops) {
+      if (cop.stagger > 0) {
+        cop.stagger -= dt;
+        continue;
+      }
+      const d = dist(cop.x, cop.y, p.x, p.y);
+      if (d < 26) {
+        cop.bustT += dt;
+        if (cop.bustT > 0.7) {
+          cop.bustT = -99;
+          cop.triggerBust = true;
+        }
+      } else {
+        cop.bustT = 0;
+        const speed = state.stars >= 4 ? 300 : 260;
+        const a = angleTo(cop.x, cop.y, p.x, p.y);
+        cop.angle = a;
+        moveCircle(cop, Math.cos(a) * speed * dt, Math.sin(a) * speed * dt, PED.radius);
+      }
+    }
+  }
+
+  function updatePolice(dt) {
+    const wanted = state.stars;
+    const copCars = state.cars.filter((c) => c.police && !c.wrecked).length;
+    const wantedCars = wanted > 0 ? Math.min(wanted, COP_CAR_MAX) : 0;
+    state.copSpawnT -= dt;
+    if (copCars < wantedCars && state.copSpawnT <= 0) {
+      spawnCopCar();
+      state.copSpawnT = 1.5;
+    }
+    if (wanted === 0) {
+      state.cars = state.cars.filter((c) => !c.police);
+      state.cops = [];
+    }
+    const wantedFoot = wanted >= 2 ? Math.min(wanted - 1, 4) : 0;
+    state.footSpawnT -= dt;
+    if (state.cops.length < wantedFoot && state.footSpawnT <= 0) {
+      const a = rng.range(0, TAU);
+      state.cops.push({
+        x: clamp(state.player.x + Math.cos(a) * 320, 40, WORLD.width - 40),
+        y: clamp(state.player.y + Math.sin(a) * 320, 40, WORLD.height - 40),
+        angle: 0,
+        bustT: 0,
+        stagger: 0,
+        triggerBust: false,
+      });
+      state.footSpawnT = 1.2;
+    }
+  }
+
+  function updateCollisions() {
+    const p = state.player;
+    const pc = p.inCar ? playerCar() : null;
+    // Player's car vs pedestrians.
+    if (pc && Math.abs(pc.speed) > 60) {
+      for (const ped of state.peds) {
+        if (ped.down > 0) continue;
+        if (dist(ped.x, ped.y, pc.x, pc.y) < 34) {
+          ped.down = 3;
+          const a = angleTo(pc.x, pc.y, ped.x, ped.y);
+          moveCircle(ped, Math.cos(a) * 50, Math.sin(a) * 50, PED.radius);
+          addHeat(HEAT.hitPed);
+          playSound('crash');
+          pc.speed *= 0.85;
+        }
+      }
+    }
+    // Traffic cars hitting the player on foot (rate-limited per car).
+    if (!p.inCar) {
+      for (const car of state.cars) {
+        if (car.wrecked || Math.abs(car.speed) < 40 || car.hitT > 0) continue;
+        if (dist(car.x, car.y, p.x, p.y) < 34) {
+          p.hp -= 20;
+          playSound('crash');
+          const a = angleTo(car.x, car.y, p.x, p.y);
+          moveCircle(p, Math.cos(a) * 70, Math.sin(a) * 70, PLAYER.radius);
+          car.speed *= 0.5;
+          car.hitT = 1;
+        }
+      }
+    }
+    // Car vs car: push apart, damage by impact.
+    const cars = state.cars;
+    for (let i = 0; i < cars.length; i += 1) {
+      for (let j = i + 1; j < cars.length; j += 1) {
+        const a = cars[i];
+        const b = cars[j];
+        if (a.wrecked && b.wrecked) continue;
+        const d = dist(a.x, a.y, b.x, b.y);
+        if (d < 42 && d > 0.01) {
+          const push = (42 - d) / 2;
+          const nx = (b.x - a.x) / d;
+          const ny = (b.y - a.y) / d;
+          moveCircle(a, -nx * push, -ny * push, CAR.radius);
+          moveCircle(b, nx * push, ny * push, CAR.radius);
+          const impact = Math.abs(a.speed - b.speed);
+          if (impact > 200 && a.dmgT <= 0 && b.dmgT <= 0) {
+            damageCar(a, (impact - 200) / 20);
+            damageCar(b, (impact - 200) / 20);
+            if (a.police || b.police) addHeat(HEAT.ramCopCar);
+            playSound('crash');
+            a.dmgT = 0.5;
+            b.dmgT = 0.5;
+          }
+          a.speed *= 0.8;
+          b.speed *= 0.8;
+        }
+      }
+    }
+  }
+
+  function updateMissions(dt) {
+    if (!state.missionActive || state.won) return 0;
+    const m = MISSIONS[state.missionIndex];
+    const p = state.player;
+    if (state.missionIndex === 0) {
+      if (p.inCar && dist(p.x, p.y, m.target.x, m.target.y) < 100) return completeMission();
+    } else if (state.missionIndex === 1) {
+      if (state.missionStage === 0) {
+        if (dist(p.x, p.y, m.start.x, m.start.y) < 90) {
+          state.missionStage = 1;
+          state.missionTimer = m.timeLimit;
+          addMessage('Package collected! Deliver to Solmara Tower — fast!');
+          playSound('pickup');
+        }
+      } else {
+        state.missionTimer -= dt;
+        if (dist(p.x, p.y, m.target.x, m.target.y) < 100) return completeMission();
+        if (state.missionTimer <= 0) {
+          failMission('Delivery failed — too slow. Press ENTER to retry.');
+          return 0;
+        }
       }
     } else if (state.missionIndex === 2) {
-      const nearHouse = dist(p.x, p.y, m.def.target.x, m.def.target.y) < 150;
-      if (nearHouse && state.heat <= 0) return completeMission();
+      if (state.missionStage === 0) {
+        if (state.stars >= m.needStars) {
+          state.missionStage = 1;
+          addMessage('3 stars! Now lose the cops at the safehouse.');
+        }
+      } else if (dist(p.x, p.y, m.target.x, m.target.y) < 100) {
+        return completeMission();
+      }
     }
-    return events;
+    return 0;
   }
 
-  function stepPlayer(dt, ctrl, events) {
+  function updateStashes() {
     const p = state.player;
-    const pc = playerCar();
-    if (p.punchCooldown > 0) p.punchCooldown -= dt;
-    if (p.invulnerable > 0) p.invulnerable -= dt;
-
-    if (pc) {
-      // Driving.
-      const throttle = -ctrl.y;
-      const steer = ctrl.x;
-      const before = pc.speed;
-      driveCar(pc, throttle, steer, dt, ctrl.brake);
-      // The player rides with the car: missions, the camera and the cops all
-      // read the player's position, so it tracks the car while driving.
-      p.x = pc.x;
-      p.y = pc.y;
-      if (Math.abs(pc.speed) > 300 && random.next() < dt * 6) {
-        state.particles.push({
-          x: pc.x - Math.cos(pc.angle) * 22, y: pc.y - Math.sin(pc.angle) * 22,
-          vx: -Math.cos(pc.angle) * 40, vy: -Math.sin(pc.angle) * 40,
-          life: 0.5, max: 0.5, color: '#999999', size: 5,
-        });
-      }
-      if (pushCarOutOfBuildings(pc)) {
-        const impact = Math.abs(before);
-        if (impact > 190) {
-          events = damageCar(pc, (impact - 190) / 16, events);
-          burst(pc.x, pc.y, '#ffd94a', 10, 180);
-          events |= EVENT_CRASH;
-          if (impact > 320) {
-            state.health -= 6;
-            say('That crash hurt!');
-          }
-        }
-        pc.speed *= 0.45;
-      }
-      // Bump into other cars.
-      for (const other of state.cars) {
-        if (other === pc || other.wrecked) continue;
-        const d = dist(pc.x, pc.y, other.x, other.y);
-        if (d < 40 && d > 0.01) {
-          const push = (40 - d) / 2;
-          const nx = (pc.x - other.x) / d;
-          const ny = (pc.y - other.y) / d;
-          pc.x += nx * push;
-          pc.y += ny * push;
-          other.x -= nx * push;
-          other.y -= ny * push;
-          const closing = Math.abs(pc.speed - other.speed);
-          if (closing > 140) {
-            events = damageCar(pc, closing / 22, events);
-            events = damageCar(other, closing / 22, events);
-            if (other.isCop) addHeat(HEAT_RAM_COP);
-            burst(pc.x, pc.y, '#ffd94a', 8, 160);
-            events |= EVENT_CRASH;
-          }
-          pc.speed *= 0.7;
-          other.speed *= 0.7;
-        }
-      }
-      if (pc.health < 35 && random.next() < dt * 8) {
-        state.particles.push({
-          x: pc.x, y: pc.y - 8,
-          vx: random.range(-12, 12), vy: random.range(-40, -16),
-          life: 0.9, max: 0.9, color: '#666666', size: 7,
-        });
-      }
-    } else {
-      // On foot.
-      const len = Math.hypot(ctrl.x, ctrl.y);
-      p.moving = len > 0;
-      if (len > 0) {
-        const speed = ctrl.run ? RUN_SPEED : WALK_SPEED;
-        const nx = p.x + (ctrl.x / len) * speed * dt;
-        const ny = p.y + (ctrl.y / len) * speed * dt;
-        p.angle = Math.atan2(ctrl.y, ctrl.x);
-        const fixed = collideCircle(state, nx, ny, PLAYER_RADIUS);
-        p.x = fixed.x;
-        p.y = fixed.y;
-      }
-      // Health comes back when the law is not looking.
-      if (state.heat === 0 && state.health < PLAYER_HEALTH) {
-        state.health = Math.min(PLAYER_HEALTH, state.health + 1.5 * dt);
+    for (const s of state.stashes) {
+      if (s.taken) continue;
+      if (dist(p.x, p.y, s.x, s.y) < 32) {
+        s.taken = true;
+        state.cash += STASH_VALUE;
+        addMessage(`Cash stash found! +$${STASH_VALUE}`);
+        playSound('pickup');
       }
     }
-    return events;
   }
 
-  function stepInteract(ctrl, events) {
-    const p = state.player;
-    if (ctrl.interact) {
-      if (p.inCar) {
-        const car = p.inCar;
-        car.isPlayer = false;
-        car.parked = true;
-        car.speed = 0;
-        p.inCar = null;
-        p.x = car.x + Math.cos(car.angle + Math.PI / 2) * 34;
-        p.y = car.y + Math.sin(car.angle + Math.PI / 2) * 34;
-        const fixed = collideCircle(state, p.x, p.y, PLAYER_RADIUS);
-        p.x = fixed.x;
-        p.y = fixed.y;
-        say('You left the car.');
-      } else {
-        let best = null;
-        let bestD = 46;
-        for (const car of state.cars) {
-          if (car.wrecked) continue;
-          const d = dist(p.x, p.y, car.x, car.y);
-          if (d < bestD) {
-            bestD = d;
-            best = car;
-          }
-        }
-        if (best) {
-          const wasTraffic = best.kind === 'traffic';
-          best.isPlayer = true;
-          best.parked = false;
-          best.kind = 'player';
-          p.inCar = best;
-          addHeat(HEAT_STEAL);
-          burst(best.x, best.y, COLORS.gold, 8, 120);
-          say(wasTraffic ? 'You jacked a moving car! The law noticed.' : 'You stole a parked car! The law noticed.');
-          events |= EVENT_STEAL;
-        }
-      }
-    }
-    if (ctrl.punch && !p.inCar && p.punchCooldown <= 0) {
-      p.punchCooldown = PUNCH_COOLDOWN;
-      events |= EVENT_PUNCH;
-      const fx = p.x + Math.cos(p.angle) * PUNCH_RANGE;
-      const fy = p.y + Math.sin(p.angle) * PUNCH_RANGE;
-      burst(fx, fy, '#ffffff', 6, 130);
-      // A cop in range takes the punch.
-      for (const cop of state.cops) {
-        if (dist(fx, fy, cop.x, cop.y) < 30) {
-          state.cops = state.cops.filter((c) => c !== cop);
-          addHeat(HEAT_PUNCH_COP);
-          say('You decked a cop! That will cost you.');
-          break;
-        }
-      }
-      // A pedestrian in range goes down.
-      for (const ped of state.peds) {
-        if (ped.down === 0 && dist(fx, fy, ped.x, ped.y) < 28) {
-          ped.down = 2.5;
-          addHeat(15);
-          say(`You punched ${ped.name}!`);
-          break;
-        }
-      }
-    }
-    return events;
-  }
-
-  /**
-   * One fixed step. `ctrl` is { x, y, run, brake, interact, punch } from the input
-   * layer; one-shot flags are consumed by the caller after this call. Returns the
-   * EVENT_* flags for sounds and announcements.
-   */
-  function step(dt, ctrl) {
-    let events = 0;
+  function step(dt, controls) {
+    let events = EVENT_NONE;
     state.time += dt;
-    state.elapsed += dt;
-    if (state.busted > 0) {
-      state.busted -= dt;
-      updateParticles(dt);
-      return events;
+    for (const c of state.cars) {
+      if (c.dmgT > 0) c.dmgT -= dt;
+      if (c.ramT > 0) c.ramT -= dt;
+      if (c.hitT > 0) c.hitT -= dt;
     }
-    if (state.wasted > 0) {
-      state.wasted -= dt;
-      updateParticles(dt);
-      return events;
-    }
-
-    events = stepInteract(ctrl, events);
-    events = stepPlayer(dt, ctrl, events);
-    updateTraffic(dt);
-    events = updatePeds(dt, events);
-    const copResult = updateCops(dt, events);
-    events = copResult.events;
-    if (copResult.done) {
-      updateParticles(dt);
-      return events;
-    }
-
-    // Heat fades when you lay low; faster at the safehouse.
     const p = state.player;
-    const nearHouse = dist(p.x, p.y, PLACES.safehouse.x, PLACES.safehouse.y) < 150;
-    if (state.time - state.lastCrime > 8) {
-      state.heat = Math.max(0, state.heat - (nearHouse ? HEAT_DECAY_SAFEHOUSE : HEAT_DECAY) * dt);
-    }
-    events = checkStash(events);
-    events = checkMission(dt, events);
-    updateParticles(dt);
+    if (p.punchT > 0) p.punchT -= dt;
 
-    // The camera chases the player, clamped to the world.
-    state.camera.x = clamp(p.x, 640, WORLD.w - 640);
-    state.camera.y = clamp(p.y, 400, WORLD.h - 400);
+    if (controls.actions & ACTION_ENTER_CAR) {
+      if (p.inCar) {
+        const car = playerCar();
+        p.inCar = false;
+        p.carId = -1;
+        if (car) {
+          car.driver = null;
+          car.speed = 0;
+          p.x = clamp(car.x + 42, 30, WORLD.width - 30);
+          p.y = clamp(car.y + 10, 30, WORLD.height - 30);
+        }
+      } else {
+        const car = nearestCar(p.x, p.y, 70);
+        if (car) {
+          p.inCar = true;
+          p.carId = car.id;
+          car.driver = 'player';
+          if (car.parked) car.parked = false;
+          addHeat(HEAT.stealCar);
+          addMessage(car.police ? 'You stole a police car!' : 'Car stolen! The law is coming.');
+          playSound('pickup');
+        }
+      }
+    }
+
+    if (controls.actions & ACTION_PUNCH && !p.inCar && p.punchT <= 0) {
+      p.punchT = PLAYER.punchCooldown;
+      let hitSomething = false;
+      for (const ped of state.peds) {
+        if (ped.down > 0) continue;
+        if (dist(ped.x, ped.y, p.x, p.y) < PLAYER.punchRange) {
+          ped.down = 3;
+          const a = angleTo(p.x, p.y, ped.x, ped.y);
+          moveCircle(ped, Math.cos(a) * 46, Math.sin(a) * 46, PED.radius);
+          addHeat(HEAT.hitPed);
+          hitSomething = true;
+        }
+      }
+      for (const cop of state.cops) {
+        if (dist(cop.x, cop.y, p.x, p.y) < PLAYER.punchRange) {
+          cop.stagger = 1;
+          addHeat(HEAT.punchCop);
+          hitSomething = true;
+        }
+      }
+      if (hitSomething) playSound('punch');
+    }
+
+    updatePlayer(dt, controls);
+    updateTraffic(dt);
+    updatePeds(dt);
+    updateCopCars(dt);
+    updateFootCops(dt);
+    updateCollisions();
+    updatePolice(dt);
+    updateStashes();
+    events |= updateMissions(dt);
+
+    if (state.time - state.lastCrime > 5 && state.heat > 0) {
+      state.heat = Math.max(0, state.heat - HEAT_DECAY * dt * (state.stars >= 3 ? 0.5 : 1));
+      state.stars = starsFor(state.heat);
+    }
+
+    for (const cop of state.cops) {
+      if (cop.triggerBust) return events | busted();
+    }
+    if (p.hp <= 0) return events | wasted();
     return events;
   }
 
   reset();
+
   return {
-    state, reset, step, startMission, addHeat, stars, say,
-    districtAt: (x, y) => districtAt(x, y),
+    state,
+    city,
+    reset,
+    step,
+    addHeat,
+    startMission,
+    playerCar,
+    save() {
+      return {
+        cash: state.cash,
+        missions: [...state.missionDone],
+        missionIndex: state.missionIndex,
+        stashes: state.stashes.filter((s) => s.taken).length,
+      };
+    },
+    load(save) {
+      if (!save) return;
+      state.cash = save.cash || 0;
+      if (Array.isArray(save.missions)) {
+        state.missionDone = [!!save.missions[0], !!save.missions[1], !!save.missions[2]];
+        state.missionIndex = state.missionDone.filter(Boolean).length;
+        if (state.missionIndex > 2) state.won = true;
+      }
+    },
   };
 }

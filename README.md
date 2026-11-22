@@ -1,65 +1,63 @@
-# Solmara — Streets of Gold
+[![make.fun](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01)
+[![Rank](https://make.fun/badge/gta6-01/Kinanty22/gta6-01/rank.svg)](https://make.fun/bounty/gta6-01)
+[![Reward](https://make.fun/badge/gta6-01/Kinanty22/gta6-01/reward.svg)](https://make.fun/bounty/gta6-01)
 
-[![make.fun · gta6-01](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
-[![rank](https://make.fun/badge/gta6-01/Kinanty22/gta6-01/rank.svg)](https://make.fun/bounty/gta6-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
-[![reward](https://make.fun/badge/gta6-01/Kinanty22/gta6-01/reward.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+# SOLMARA — Streets of Gold
 
-An open-world crime game in the spirit of GTA 6, built for
-[make.fun](https://make.fun)'s "Make GTA 6" bounty. Everything is original: the
-city of Solmara, its people, its cars, its story. Nothing from Rockstar Games.
+A complete 2D top-down open-world crime game in the spirit of GTA 6, built
+for the [make.fun](https://make.fun/bounty/gta6-01) bounty **gta6-01**. Plain
+HTML and JavaScript, no libraries, no build step, no network request: it
+runs offline in a desktop browser from the static files under `game/`.
 
-## The game
+## The city
 
-Solmara is a sun-soaked coastal city, 3600×2600 of streets, districts and
-beach: Downtown, Old Town, the Marina, the Suburbs and Palm Beach, with a park,
-a pond and the sea along the south edge. Walk it on foot or steal a car and
-drive it — traffic, taxis and pedestrians fill the roads.
+Solmara is a 3600×2600 coastal city with five districts — Downtown, Old
+Town, Marina, Suburbs and Palm Beach — a road grid, a park with a pond, a
+beach and the sea, about 70 buildings, traffic (16 cars plus taxis) and 42
+pedestrians going about their day.
 
-The law is watching. Steal a car, hit a pedestrian or deck a cop and your
-wanted level climbs, 0 to 5 stars: cop cars chase you down the road grid and
-ram you, foot patrols chase you down and bust you. Lay low and the heat fades;
-lose it at the safehouse and you are clean again. Get busted or wasted and you
-wake up at Police HQ or the hospital, lighter by a fine.
+## What you can do
 
-Mara Voss, the fixer, has three jobs for you: **Hot Wheels** (steal a car,
-bring it to the Marina, $300), **The Package** (a timed delivery from the docks
-to the Solmara Tower, $600) and **Heat Wave** (lose a 3-star wanted level at the
-safehouse, $900). Ten hidden cash stashes ($150 each) are scattered around the
-city. Finish all three jobs and Solmara is yours.
+- **On foot:** walk and run, punch, pick up hidden cash stashes ($150 each).
+- **Driving:** steal any car with **E** (parked cars, traffic, even a police
+  car), drive with acceleration, steering and handbrake drifts. Cars take
+  damage, smoke and wreck.
+- **Wanted system, 0–5 stars:** stealing, hitting pedestrians, punching
+  cops and ramming police cars raise your heat. Cop cars chase you on the
+  road grid and ram; foot cops chase and bust you. Lay low and the heat
+  fades. Busted or wasted means a $100 fine and a respawn — the game goes on.
+- **Missions for fixer Mara Voss:** Hot Wheels (steal a car, reach the
+  Marina, $300), The Package (a timed dock-to-downtown delivery, $600) and
+  Heat Wave (earn 3 stars, then lose the cops at the safehouse, $900).
+  Finish all three and Solmara is yours.
+- **HUD:** cash, health, wanted stars, mission banner with a timer, message
+  feed, speed and car health, and a live minimap (roads, mission marker,
+  police blips, player arrow). Progress saves to localStorage.
+- **Sound:** WebAudio synth only — engine hum, sirens, punches, crashes and
+  mission jingles. No audio files.
 
-## How to play
-
-Open `game/index.html` in a desktop browser, or serve the game folder:
-
-```sh
-node serve.ts
-# then open http://localhost:8080
-```
-
-No build step, no network: every file the game loads sits under `game/`.
+## Controls
 
 | Key | Action |
 | --- | --- |
 | WASD / arrows | Move / drive |
-| E | Enter or leave a car |
-| F | Punch |
-| Shift | Run |
-| Space | Handbrake |
-| Enter | Start / accept a mission |
+| SHIFT | Run |
+| E | Steal / exit car |
+| SPACE | Punch (on foot) / handbrake (driving) |
+| ENTER | Start mission / start game |
 | P | Pause |
 | M | Mute |
 
-Progress (cash, missions, stashes) saves to your browser's local storage.
+## Run it
 
-## Sound
+```sh
+node serve.ts
+# open http://localhost:8080
+```
 
-All sound is synthesised with WebAudio: engine hum, sirens, punches, crashes
-and mission jingles. No audio files.
+Screenshots are real renders of the game in a browser
+(`?shot=chase|street|delivery|beach&seed=7`).
 
-## Built with
+## License
 
-Plain HTML, CSS and JavaScript — no libraries, no build step. The entry program
-`main.ts` (Node 22, standard library only) copies `game/` and `screenshots/`
-and writes the dossier the judge reads.
-
-Referral code: `mjp730py`
+MIT — see [LICENSE](LICENSE).

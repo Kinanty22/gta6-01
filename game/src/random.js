@@ -1,6 +1,6 @@
-// A small seeded random generator (mulberry32) plus the few helpers the city builder
-// and the world simulation use. Same seed, same city, same traffic: the screenshots
-// and the playtest are reproducible from `?seed=N`.
+// A small seeded RNG (mulberry32) so a screenshot seed always builds the same
+// city, traffic and pedestrians, and the live game can pick a fresh seed.
+
 export function createRandom(seed) {
   let a = seed >>> 0;
   function next() {
@@ -12,19 +12,15 @@ export function createRandom(seed) {
   }
   return {
     next,
-    /** Float in [min, max). */
     range(min, max) {
       return min + next() * (max - min);
     },
-    /** Integer in [min, max] inclusive. */
     int(min, max) {
-      return min + Math.floor(next() * (max - min + 1));
+      return Math.floor(min + next() * (max - min + 1));
     },
-    /** One element of `list`. */
     pick(list) {
       return list[Math.floor(next() * list.length)];
     },
-    /** True with probability `p`. */
     chance(p) {
       return next() < p;
     },

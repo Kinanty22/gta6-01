@@ -1,79 +1,75 @@
-// Keyboard and pointer input. Held keys give a steering vector; one-shot presses
-// (confirm, pause, interact, punch, mute) are queued as bit flags and taken once by
-// the loop, so a press between two frames is never lost and never counted twice.
+// Keyboard input: held keys for movement and driving, and edge-triggered
+// actions (enter a car, punch, confirm, pause) consumed once per press.
+
 export const ACTION_CONFIRM = 1;
 export const ACTION_PAUSE = 2;
-export const ACTION_INTERACT = 4;
+export const ACTION_ENTER_CAR = 4;
 export const ACTION_PUNCH = 8;
 export const ACTION_MUTE = 16;
 
-const UP = new Set(['ArrowUp', 'KeyW']);
-const DOWN = new Set(['ArrowDown', 'KeyS']);
-const LEFT = new Set(['ArrowLeft', 'KeyA']);
-const RIGHT = new Set(['ArrowRight', 'KeyD']);
-const RUN = new Set(['ShiftLeft', 'ShiftRight']);
-const BRAKE = new Set(['Space']);
-const CONFIRM = new Set(['Enter']);
-const PAUSE = new Set(['KeyP', 'Escape']);
-const INTERACT = new Set(['KeyE']);
-const PUNCH = new Set(['KeyF']);
-const MUTE = new Set(['KeyM']);
+const KEY_ACTIONS = {
+  Enter: ACTION_CONFIRM,
+  KeyP: ACTION_PAUSE,
+  Escape: ACTION_PAUSE,
+  KeyE: ACTION_ENTER_CAR,
+  Space: ACTION_PUNCH,
+  KeyM: ACTION_MUTE,
+};
 
 export function createInput(target) {
   const held = new Set();
-  let actions = 0;
+  let queued = 0;
 
-  window.addEventListener('keydown', (event) => {
-    if (event.repeat) {
-      if (UP.has(event.code) || DOWN.has(event.code) || LEFT.has(event.code) || RIGHT.has(event.code)) {
-        held.add(event.code);
-      }
-      return;
+  function onKeyDown(event) {
+    if (event.repeat) return;
+    held.add(event.code);
+    const action = KEY_ACTIONS[event.code];
+    if (action) {
+      queued |= action;
+      event.preventDefault();
     }
-    if (UP.has(event.code) || DOWN.has(event.code) || LEFT.has(event.code) || RIGHT.has(event.code)
-      || RUN.has(event.code) || BRAKE.has(event.code)) {
-      held.add(event.code);
-    } else if (CONFIRM.has(event.code)) actions |= ACTION_CONFIRM;
-    else if (PAUSE.has(event.code)) actions |= ACTION_PAUSE;
-    else if (INTERACT.has(event.code)) actions |= ACTION_INTERACT;
-    else if (PUNCH.has(event.code)) actions |= ACTION_PUNCH;
-    else if (MUTE.has(event.code)) actions |= ACTION_MUTE;
-    else return;
-    event.preventDefault();
-  });
-  window.addEventListener('keyup', (event) => {
+    if (event.code === 'Space') event.preventDefault();
+  }
+  function onKeyUp(event) {
     held.delete(event.code);
-  });
-  // A key released while the tab is hidden never sends keyup: let go on blur.
-  window.addEventListener('blur', () => held.clear());
-  target.addEventListener('pointerdown', () => {
-    actions |= ACTION_CONFIRM;
-  });
+  }
 
-  function has(set) {
-    for (const code of set) if (held.has(code)) return true;
-    return false;
+  target.addEventListener('keydown', onKeyDown);
+  target.addEventListener('keyup', onKeyUp);
+  if (target !== window && typeof window !== 'undefined') {
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+  }
+
+  function axis(neg, pos) {
+    return (held.has(pos) ? 1 : 0) - (held.has(neg) ? 1 : 0);
   }
 
   return {
-    /** Steering vector, each component -1, 0 or 1. */
-    vector() {
+    /** Movement vector for walking: x right, y down, each -1, 0 or 1. */
+    direction() {
+      const x = axis('KeyA', 'KeyD') + axis('ArrowLeft', 'ArrowRight');
+      const y = axis('KeyW', 'KeyS') + axis('ArrowUp', 'ArrowDown');
+      return { x: Math.max(-1, Math.min(1, x)), y: Math.max(-1, Math.min(1, y)) };
+    },
+    /** Driving controls: throttle -1..1, steering -1..1, handbrake held. */
+    drive() {
+      const throttle = axis('KeyS', 'KeyW') + axis('ArrowDown', 'ArrowUp');
+      const steer = axis('KeyA', 'KeyD') + axis('ArrowLeft', 'ArrowRight');
       return {
-        x: (has(RIGHT) ? 1 : 0) - (has(LEFT) ? 1 : 0),
-        y: (has(DOWN) ? 1 : 0) - (has(UP) ? 1 : 0),
+        throttle: Math.max(-1, Math.min(1, throttle)),
+        steer: Math.max(-1, Math.min(1, steer)),
+        handbrake: held.has('Space'),
       };
     },
-    running() {
-      return has(RUN);
+    run() {
+      return held.has('ShiftLeft') || held.has('ShiftRight');
     },
-    braking() {
-      return has(BRAKE);
-    },
-    /** The one-shot presses since the last call, as ACTION_* flags. */
+    /** Actions pressed since the last call; each is reported once. */
     takeActions() {
-      const taken = actions;
-      actions = 0;
-      return taken;
+      const out = queued;
+      queued = 0;
+      return out;
     },
   };
 }
